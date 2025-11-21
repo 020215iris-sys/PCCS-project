@@ -41,7 +41,7 @@ def parse_lip_html(html_path):
     if name_tag:
         product_name = name_tag.get_text(strip=True)
 
-    # 컬러칩 이미지들
+    # 컬러칩 이미지들.
     chip_imgs = soup.select(".ColorChips_colorchip-item__PXPll img")
     image_urls = [img["src"] for img in chip_imgs if img.get("src")]
 
