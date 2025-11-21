@@ -1,2 +1,2 @@
 print("hello learning")
-pritn("learning test")
+print("learning test")
