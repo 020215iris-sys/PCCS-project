@@ -1,114 +1,144 @@
 import os
 import csv
 import requests
+import re
 from datetime import datetime
 from bs4 import BeautifulSoup
 
+# ============================================
+# 1) 경로 설정
+# ============================================
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RESULT_DIR = os.path.join(BASE_DIR, "result")
+IMG_DIR = os.path.join(RESULT_DIR, "colorchips")
+CSV_PATH = os.path.join(RESULT_DIR, "lip_info.csv")
 
-# ---------------------------------------------------
-# 1. 이미지 저장 함수
-# ---------------------------------------------------
-def download_image(url, save_path):
-    try:
-        img = requests.get(url, timeout=10)
-        if img.status_code == 200:
-            with open(save_path, "wb") as f:
-                f.write(img.content)
-            return True
-    except:
-        return False
-    return False
+os.makedirs(IMG_DIR, exist_ok=True)
 
+# ============================================
+# 파일명 금지문자 및 길이 제한 처리 함수
+# ============================================
+def clean_filename(text):
+    # 금지문자 제거
+    text = re.sub(r'[\\/:*?"<>|]', '', text)
+    # 줄바꿈 제거
+    text = text.replace("\n", "").replace("\r", "")
+    # 공백 정리
+    text = text.strip()
+    # 파일명 길이 제한 (윈도우 260자 오류 방지)
+    return text[:90]
 
-# ---------------------------------------------------
-# 2. HTML 파일에서 정보 추출
-# ---------------------------------------------------
-def parse_lip_html(html_path):
+# ============================================
+# 2) HTML 파일 파싱 함수
+# ============================================
+def parse_from_html(html_path):
+
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # 브랜드명
-    brand = "UnknownBrand"
-    brand_tag = soup.select_one(".tx_brand, .prd_brand")
-    if brand_tag:
-        brand = brand_tag.get_text(strip=True)
+    # 브랜드명 찾기
+    brand_tag = soup.select_one(".TopUtils_btn-brand__tvEdp, .prd_brand, .tx_brand")
+    brand = brand_tag.text.strip() if brand_tag else "UnknownBrand"
 
-    # 제품명
-    product_name = "UnknownProduct"
-    name_tag = soup.select_one(".prd_name, .product_tit")
-    if name_tag:
-        product_name = name_tag.get_text(strip=True)
+    # 제품명 찾기
+    name_tag = soup.select_one(".prd_name, .product_tit, h3")
+    product_name = name_tag.text.strip() if name_tag else "UnknownProduct"
 
-    # 컬러칩 이미지들.
-    chip_imgs = soup.select(".ColorChips_colorchip-item__PXPll img")
-    image_urls = [img["src"] for img in chip_imgs if img.get("src")]
+    # 컬러칩 이미지 URL 수집
+    chips = soup.select(".ColorChips_colorchip-item__PXPll img")
+    color_list = []
 
-    return brand, product_name, image_urls
+    for img in chips:
+        alt_name = img.get("alt", "UnknownColor").strip()
+        img_url = img.get("src", "")
+
+        if img_url:
+            color_list.append((alt_name, img_url))
+
+    return brand, product_name, color_list
 
 
-# ---------------------------------------------------
-# 3. 메인 실행 (HTML → 이미지 저장 + CSV 기록)
-# ---------------------------------------------------
-def run_from_html(html_path):
-    BASE = os.path.dirname(os.path.dirname(__file__))  # /PCCS
-    RESULT_DIR = os.path.join(BASE, "result")
-    os.makedirs(RESULT_DIR, exist_ok=True)
+# ============================================
+# 3) 이미지 저장 함수 (안전 파일명 적용)
+# ============================================
+def save_image(img_url, brand, color_name):
+    try:
+        safe_brand = clean_filename(brand)
+        safe_color = clean_filename(color_name)
 
-    # 이미지 저장 폴더
-    COLORCHIP_DIR = os.path.join(RESULT_DIR, "colorchips")
-    os.makedirs(COLORCHIP_DIR, exist_ok=True)
+        file_name = f"{safe_brand}_{safe_color}.jpg"
+        save_path = os.path.join(IMG_DIR, file_name)
 
-    CSV_PATH = os.path.join(RESULT_DIR, "lip_info.csv")
+        response = requests.get(img_url, timeout=10)
+        response.raise_for_status()
 
-    # HTML 분석
-    brand, product_name, image_urls = parse_lip_html(html_path)
+        with open(save_path, "wb") as f:
+            f.write(response.content)
 
-    # 고유번호 = html 파일명에서 확장자 제거
-    product_id = os.path.splitext(os.path.basename(html_path))[0]
+        return file_name
 
-    rows = []
+    except Exception as e:
+        print(f"이미지 저장 실패: {e}")
+        return None
 
-    # 이미지 다운로드 및 파일명 생성
-    for idx, url in enumerate(image_urls, start=1):
-        filename = f"{brand}_{product_name}_{product_id}_chip{idx}.jpg"
-        filename = filename.replace("/", "_").replace(" ", "_")
-        save_path = os.path.join(COLORCHIP_DIR, filename)
 
-        download_image(url, save_path)
+# ============================================
+# 4) CSV 생성/추가 함수
+# ============================================
+def save_to_csv(rows):
 
-        rows.append({
-            "brand": brand,
-            "product_name": product_name,
-            "product_id": product_id,
-            "image_url": url,
-            "saved_filename": filename,
-            "crawled_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
+    header = ["brand", "product_name", "color_name", "img_url", "img_file", "date", "time"]
 
-    # CSV 저장 (중복 헤더 방지)
-    header = ["brand", "product_name", "product_id", "image_url", "saved_filename", "crawled_at"]
     write_header = not os.path.exists(CSV_PATH)
 
     with open(CSV_PATH, "a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=header)
+        writer = csv.writer(f)
+
         if write_header:
-            writer.writeheader()
+            writer.writerow(header)
+
         writer.writerows(rows)
 
-    print(f"\n✔ 브랜드: {brand}")
-    print(f"✔ 제품명: {product_name}")
-    print(f"✔ 저장된 컬러칩 이미지 수: {len(image_urls)}")
-    print(f"✔ 이미지 저장 위치: {COLORCHIP_DIR}")
-    print(f"✔ CSV 저장 위치: {CSV_PATH}")
-    print("🎉 완료!")
+
+# ============================================
+# 5) 실행 메인 함수
+# ============================================
+def run(html_path):
+    print("크롤링 시작…")
+
+    brand, product_name, color_list = parse_from_html(html_path)
+
+    now = datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H:%M:%S")
+
+    rows = []
+
+    for color_name, img_url in color_list:
+        img_file = save_image(img_url, brand, color_name)
+
+        rows.append([
+            brand,
+            product_name,
+            color_name,
+            img_url,
+            img_file,
+            date_str,
+            time_str
+        ])
+
+    save_to_csv(rows)
+
+    print(f"CSV 저장 완료 → {CSV_PATH}")
+    print("이미지 저장 완료 → colorchips 폴더")
+    print("크롤링 완료! 💜")
 
 
-# ---------------------------------------------------
-# 4. 직접 실행할 때
-# ---------------------------------------------------
+# ============================================
+# 6) 직접 실행할 때
+# ============================================
 if __name__ == "__main__":
-    # 예: 나연이 저장한 HTML 파일
-    html_file = "lip_page.html"  # 파일명을 여기에 입력
-    run_from_html(html_file)
+    test_html = r"C:\Users\user\Desktop\learning4\PCCS-project\products\html\lipfull12mode.html"
+    run(test_html)
